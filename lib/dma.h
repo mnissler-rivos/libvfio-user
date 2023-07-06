@@ -92,8 +92,14 @@ struct dma_sg {
     bool writeable;
 };
 
+enum dma_access_mode {
+    DMA_ACCESS_MODE_MMAP,
+    DMA_ACCESS_MODE_MESSAGE,
+};
+
 typedef struct {
     vfu_dma_info_t info;
+    enum dma_access_mode access_mode;
     int fd;                     // File descriptor to mmap
     off_t offset;               // File offset
     uint8_t *dirty_bitmap;         // Dirty page bitmap
@@ -125,8 +131,8 @@ dma_controller_destroy(dma_controller_t *dma);
  * - On failure, -1 with errno set.
  */
 MOCK_DECLARE(int, dma_controller_add_region, dma_controller_t *dma,
-             vfu_dma_addr_t dma_addr, uint64_t size, int fd, off_t offset,
-             uint32_t prot);
+             enum dma_access_mode access_mode, vfu_dma_addr_t dma_addr,
+             uint64_t size, int fd, off_t offset, uint32_t prot);
 
 MOCK_DECLARE(int, dma_controller_remove_region, dma_controller_t *dma,
              vfu_dma_addr_t dma_addr, size_t size,

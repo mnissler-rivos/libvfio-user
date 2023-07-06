@@ -708,6 +708,7 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
     int fd = -1;
     int ret;
     uint32_t prot = 0;
+    enum dma_access_mode access_mode = DMA_ACCESS_MODE_MESSAGE;
 
     assert(vfu_ctx != NULL);
     assert(msg != NULL);
@@ -748,9 +749,10 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
             vfu_log(vfu_ctx, LOG_ERR, "failed to add DMA region %s: %m", rstr);
             return -1;
         }
+        access_mode = DMA_ACCESS_MODE_MMAP;
     }
 
-    ret = dma_controller_add_region(vfu_ctx->dma,
+    ret = dma_controller_add_region(vfu_ctx->dma, access_mode,
                                     (vfu_dma_addr_t)(uintptr_t)dma_map->addr,
                                     dma_map->size, fd, dma_map->offset,
                                     prot);

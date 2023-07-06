@@ -112,16 +112,17 @@ unpatch_all(void)
 }
 
 int
-dma_controller_add_region(dma_controller_t *dma, void *dma_addr,
-                          uint64_t size, int fd, off_t offset,
-                          uint32_t prot)
+dma_controller_add_region(dma_controller_t *dma,
+                          enum dma_access_mode access_mode, void *dma_addr,
+                          uint64_t size, int fd, off_t offset, uint32_t prot)
 {
     if (!is_patched("dma_controller_add_region")) {
-        return __real_dma_controller_add_region(dma, dma_addr, size, fd, offset,
-                                                prot);
+        return __real_dma_controller_add_region(dma, access_mode, dma_addr,
+                                                size, fd, offset, prot);
     }
 
     check_expected_ptr(dma);
+    check_expected(access_mode);
     check_expected_ptr(dma_addr);
     check_expected(size);
     check_expected(fd);

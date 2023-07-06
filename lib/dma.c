@@ -80,6 +80,19 @@ fds_are_same_file(int fd1, int fd2)
             st1.st_dev == st2.st_dev && st1.st_ino == st2.st_ino);
 }
 
+static const char *
+dma_access_mode_str(enum dma_access_mode mode)
+{
+    switch (mode) {
+    case DMA_ACCESS_MODE_MMAP:
+        return "mmap";
+    case DMA_ACCESS_MODE_MESSAGE:
+        return "msg";
+    }
+
+    return NULL;
+}
+
 dma_controller_t *
 dma_controller_create(vfu_ctx_t *vfu_ctx, size_t max_regions, size_t max_size)
 {
@@ -290,6 +303,7 @@ dirty_page_logging_start_on_region(dma_memory_region_t *region, size_t pgsize)
 
 int
 MOCK_DEFINE(dma_controller_add_region)(dma_controller_t *dma,
+                                       enum dma_access_mode access_mode,
                                        vfu_dma_addr_t dma_addr, uint64_t size,
                                        int fd, off_t offset, uint32_t prot)
 {
@@ -300,8 +314,9 @@ MOCK_DEFINE(dma_controller_add_region)(dma_controller_t *dma,
 
     assert(dma != NULL);
 
-    snprintf(rstr, sizeof(rstr), "[%p, %p) fd=%d offset=%#llx prot=%#x",
-             dma_addr, dma_addr + size, fd, (ull_t)offset, prot);
+    snprintf(rstr, sizeof(rstr), "[%p, %p) mode=%s fd=%d offset=%#llx prot=%#x",
+             dma_addr, dma_addr + size, dma_access_mode_str(access_mode), fd,
+             (ull_t)offset, prot);
 
     if (size > dma->max_size) {
         vfu_log(dma->vfu_ctx, LOG_ERR, "DMA region size %llu > max %zu",
@@ -360,7 +375,7 @@ MOCK_DEFINE(dma_controller_add_region)(dma_controller_t *dma,
     idx = dma->nregions;
     region = &dma->regions[idx];
 
-    if (fd != -1) {
+    if (access_mode == DMA_ACCESS_MODE_MMAP) {
         page_size = fd_get_blocksize(fd);
         if (page_size < 0) {
             vfu_log(dma->vfu_ctx, LOG_ERR, "bad page size %d", page_size);
@@ -375,10 +390,11 @@ MOCK_DEFINE(dma_controller_add_region)(dma_controller_t *dma,
     region->info.iova.iov_len = size;
     region->info.page_size = page_size;
     region->info.prot = prot;
+    region->access_mode = access_mode;
     region->offset = offset;
     region->fd = fd;
 
-    if (fd != -1) {
+    if (access_mode == DMA_ACCESS_MODE_MMAP) {
         int ret;
 
         /*

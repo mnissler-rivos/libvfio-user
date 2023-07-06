@@ -146,6 +146,7 @@ test_dma_map_without_fd(void **state UNUSED)
     will_return(dma_controller_add_region, 0);
     will_return(dma_controller_add_region, 0);
     expect_value(dma_controller_add_region, dma, vfu_ctx.dma);
+    expect_value(dma_controller_add_region, access_mode, DMA_ACCESS_MODE_MESSAGE);
     expect_value(dma_controller_add_region, dma_addr, dma_map.addr);
     expect_value(dma_controller_add_region, size, dma_map.size);
     expect_value(dma_controller_add_region, fd, -1);
@@ -189,6 +190,7 @@ test_dma_map_return_value(void **state UNUSED)
 
     patch("dma_controller_add_region");
     expect_value(dma_controller_add_region, dma, (uintptr_t)vfu_ctx.dma);
+    expect_value(dma_controller_add_region, access_mode, DMA_ACCESS_MODE_MESSAGE);
     expect_value(dma_controller_add_region, dma_addr, dma_map.addr);
     expect_value(dma_controller_add_region, size, dma_map.size);
     expect_value(dma_controller_add_region, fd, -1);
@@ -255,8 +257,10 @@ test_dma_controller_add_region_no_fd(void **state UNUSED)
     size_t size = 0;
     int fd = -1;
 
-    assert_int_equal(0, dma_controller_add_region(vfu_ctx.dma, dma_addr,
-                                                  size, fd, offset, PROT_NONE));
+    assert_int_equal(0, dma_controller_add_region(vfu_ctx.dma,
+                                                  DMA_ACCESS_MODE_MESSAGE,
+                                                  dma_addr, size, fd, offset,
+                                                  PROT_NONE));
     assert_int_equal(1, vfu_ctx.dma->nregions);
     r = &vfu_ctx.dma->regions[0];
     assert_ptr_equal(NULL, r->info.vaddr);
@@ -268,6 +272,7 @@ test_dma_controller_add_region_no_fd(void **state UNUSED)
     assert_int_equal(offset, r->offset);
     assert_int_equal(fd, r->fd);
     assert_int_equal(PROT_NONE, r->info.prot);
+    assert_int_equal(DMA_ACCESS_MODE_MESSAGE, r->access_mode);
 }
 
 static void
