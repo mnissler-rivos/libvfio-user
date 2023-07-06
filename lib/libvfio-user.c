@@ -728,6 +728,10 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
 
     vfu_log(vfu_ctx, LOG_DEBUG, "adding DMA region %s", rstr);
 
+    if (msg->in.nr_fds > 0) {
+        access_mode = DMA_ACCESS_MODE_MMAP;
+    }
+
     if (dma_map->flags & VFIO_USER_F_DMA_REGION_READ) {
         prot |= PROT_READ;
         dma_map->flags &= ~VFIO_USER_F_DMA_REGION_READ;
@@ -738,18 +742,23 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
         dma_map->flags &= ~VFIO_USER_F_DMA_REGION_WRITE;
     }
 
+    if (dma_map->flags & VFIO_USER_F_DMA_REGION_SOCKET_FD) {
+        dma_map->flags &= ~VFIO_USER_F_DMA_REGION_SOCKET_FD;
+        access_mode = DMA_ACCESS_MODE_SOCKET;
+    }
+
     if (dma_map->flags != 0) {
         vfu_log(vfu_ctx, LOG_ERR, "bad flags=%#x", dma_map->flags);
         return ERROR_INT(EINVAL);
     }
 
-    if (msg->in.nr_fds > 0) {
+    if (access_mode == DMA_ACCESS_MODE_MMAP ||
+        access_mode == DMA_ACCESS_MODE_SOCKET) {
         fd = consume_fd(msg->in.fds, msg->in.nr_fds, 0);
         if (fd < 0) {
             vfu_log(vfu_ctx, LOG_ERR, "failed to add DMA region %s: %m", rstr);
             return -1;
         }
-        access_mode = DMA_ACCESS_MODE_MMAP;
     }
 
     ret = dma_controller_add_region(vfu_ctx->dma, access_mode,
@@ -2160,12 +2169,15 @@ static int
 vfu_dma_transfer(vfu_ctx_t *vfu_ctx, enum vfio_user_command cmd,
                  dma_sg_t *sg, void *data)
 {
+    dma_memory_region_t* region = &vfu_ctx->dma->regions[sg->region];
     struct vfio_user_dma_region_access *dma_reply;
     struct vfio_user_dma_region_access *dma_req;
     struct vfio_user_dma_region_access dma;
     static int msg_id = 1;
     size_t remaining;
     size_t count;
+    size_t dma_reply_len = sizeof(*dma_req);
+    size_t dma_req_len = sizeof(*dma_req);
     size_t rlen;
     void *rbuf;
 
@@ -2175,6 +2187,22 @@ vfu_dma_transfer(vfu_ctx_t *vfu_ctx, enum vfio_user_command cmd,
 
     if (cmd == VFIO_USER_DMA_WRITE && !sg->writeable) {
         return ERROR_INT(EPERM);
+    }
+
+    /*
+     * mmap-accessible DMA typically doesn't go through this code path, but
+     * performs direct accesses via the mapping. However, code calling the
+     * vfu_sgl APIs must still function correctly, so copy memory as requested.
+     */
+    if (region->access_mode == DMA_ACCESS_MODE_MMAP) {
+        assert(region->info.vaddr != NULL);
+        void* map_addr = region->info.vaddr + sg->offset;
+        if (cmd == VFIO_USER_DMA_READ) {
+            memcpy(data, map_addr, sg->length);
+        } else {
+            memcpy(map_addr, data, sg->length);
+        }
+        return 0;
     }
 
     rlen = sizeof(struct vfio_user_dma_region_access) +
@@ -2205,14 +2233,25 @@ vfu_dma_transfer(vfu_ctx_t *vfu_ctx, enum vfio_user_command cmd,
 
         if (cmd == VFIO_USER_DMA_WRITE) {
             memcpy(rbuf + sizeof(*dma_req), data + count, dma_req->count);
-
-            ret = vfu_ctx->tran->send_msg(vfu_ctx, msg_id++, VFIO_USER_DMA_WRITE,
-                                          rbuf, rlen, NULL,
-                                          dma_reply, sizeof(*dma_reply));
+            dma_req_len = sizeof(*dma_req) + dma_req->count;
         } else {
-            ret = vfu_ctx->tran->send_msg(vfu_ctx, msg_id++, VFIO_USER_DMA_READ,
-                                          dma_req, sizeof(*dma_req), NULL,
-                                          rbuf, rlen);
+            dma_reply_len = sizeof(*dma_req) + dma_req->count;
+        }
+
+        switch (region->access_mode) {
+        case DMA_ACCESS_MODE_MESSAGE:
+            ret = vfu_ctx->tran->send_msg(vfu_ctx, msg_id++, cmd, dma_req,
+                                          dma_req_len, NULL, dma_reply,
+                                          dma_reply_len);
+            break;
+        case DMA_ACCESS_MODE_SOCKET:
+            ret = tran_sock_msg(region->fd, msg_id++, cmd, dma_req, dma_req_len,
+                                NULL, dma_reply, dma_reply_len);
+            break;
+        case DMA_ACCESS_MODE_MMAP:
+            /* DMA_ACCESS_MODE_MMAP is handled above */
+            assert(false);
+            break;
         }
 
         if (ret < 0) {

@@ -95,6 +95,7 @@ struct dma_sg {
 enum dma_access_mode {
     DMA_ACCESS_MODE_MMAP,
     DMA_ACCESS_MODE_MESSAGE,
+    DMA_ACCESS_MODE_SOCKET,
 };
 
 typedef struct {

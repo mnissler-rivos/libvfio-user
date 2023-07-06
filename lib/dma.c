@@ -88,6 +88,8 @@ dma_access_mode_str(enum dma_access_mode mode)
         return "mmap";
     case DMA_ACCESS_MODE_MESSAGE:
         return "msg";
+    case DMA_ACCESS_MODE_SOCKET:
+        return "sock";
     }
 
     return NULL;
@@ -158,6 +160,35 @@ array_remove(void *array, size_t elem_size, size_t index, int *nr_elemsp)
     (*nr_elemsp)--;
 }
 
+static void
+dma_controller_teardown_region(dma_controller_t *dma,
+                               dma_memory_region_t *region,
+                               vfu_dma_unregister_cb_t *dma_unregister,
+                               void *data)
+{
+    if (dma_unregister != NULL) {
+        dma->vfu_ctx->in_cb = CB_DMA_UNREGISTER;
+        dma_unregister(data, &region->info);
+        dma->vfu_ctx->in_cb = CB_NONE;
+    }
+
+    switch (region->access_mode) {
+        case DMA_ACCESS_MODE_MMAP:
+            if (region->info.vaddr != NULL) {
+                dma_controller_unmap_region(dma, region);
+            }
+            break;
+        case DMA_ACCESS_MODE_MESSAGE:
+            assert(region->fd == -1);
+            break;
+        case DMA_ACCESS_MODE_SOCKET:
+            if (region->fd != -1) {
+                close(region->fd);
+            }
+            break;
+    }
+}
+
 /* FIXME not thread safe */
 int
 MOCK_DEFINE(dma_controller_remove_region)(dma_controller_t *dma,
@@ -177,17 +208,7 @@ MOCK_DEFINE(dma_controller_remove_region)(dma_controller_t *dma,
             continue;
         }
 
-        if (dma_unregister != NULL) {
-            dma->vfu_ctx->in_cb = CB_DMA_UNREGISTER;
-            dma_unregister(data, &region->info);
-            dma->vfu_ctx->in_cb = CB_NONE;
-        }
-
-        if (region->info.vaddr != NULL) {
-            dma_controller_unmap_region(dma, region);
-        } else {
-            assert(region->fd == -1);
-        }
+        dma_controller_teardown_region(dma, region, dma_unregister, data);
 
         array_remove(&dma->regions, sizeof (*region), idx, &dma->nregions);
         return 0;
@@ -213,17 +234,7 @@ dma_controller_remove_all_regions(dma_controller_t *dma,
                 region->info.vaddr,
                 region->info.mapping.iov_base, iov_end(&region->info.mapping));
 
-        if (dma_unregister != NULL) {
-            dma->vfu_ctx->in_cb = CB_DMA_UNREGISTER;
-            dma_unregister(data, &region->info);
-            dma->vfu_ctx->in_cb = CB_NONE;
-        }
-
-        if (region->info.vaddr != NULL) {
-            dma_controller_unmap_region(dma, region);
-        } else {
-            assert(region->fd == -1);
-        }
+        dma_controller_teardown_region(dma, region, dma_unregister, data);
     }
 
     memset(dma->regions, 0, dma->max_regions * sizeof(dma->regions[0]));

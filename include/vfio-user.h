@@ -119,8 +119,9 @@ struct vfio_user_bitmap {
 /* based on struct vfio_iommu_type1_dma_map */
 struct vfio_user_dma_map {
     uint32_t argsz;
-#define VFIO_USER_F_DMA_REGION_READ     (1 << 0)
-#define VFIO_USER_F_DMA_REGION_WRITE    (1 << 1)
+#define VFIO_USER_F_DMA_REGION_READ      (1 << 0)
+#define VFIO_USER_F_DMA_REGION_WRITE     (1 << 1)
+#define VFIO_USER_F_DMA_REGION_SOCKET_FD (1 << 4)
     uint32_t flags;
     uint64_t offset;
     uint64_t addr;
