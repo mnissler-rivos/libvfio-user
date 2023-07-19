@@ -198,6 +198,7 @@ VFU_REGION_FLAG_ALWAYS_CB = 8
 
 VFIO_USER_F_DMA_REGION_READ = (1 << 0)
 VFIO_USER_F_DMA_REGION_WRITE = (1 << 1)
+VFIO_USER_F_DMA_REGION_SOCKET_FD = (1 << 4)
 
 VFIO_DMA_UNMAP_FLAG_GET_DIRTY_BITMAP = (1 << 0)
 
@@ -474,6 +475,14 @@ class vfio_user_dma_unmap(Structure):
     ]
 
 
+class vfio_user_dma_region_access(Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("addr", c.c_uint64),
+        ("count", c.c_uint64),
+    ]
+
+
 class vfu_dma_info_t(Structure):
     _fields_ = [
         ("iova", iovec_t),
@@ -632,6 +641,10 @@ lib.vfu_sgl_get.argtypes = (c.c_void_p, c.POINTER(dma_sg_t),
                             c.POINTER(iovec_t), c.c_size_t, c.c_int)
 lib.vfu_sgl_put.argtypes = (c.c_void_p, c.POINTER(dma_sg_t),
                             c.POINTER(iovec_t), c.c_size_t)
+lib.vfu_sgl_read.argtypes = (c.c_void_p, c.POINTER(dma_sg_t), c.c_size_t,
+                             c.c_void_p)
+lib.vfu_sgl_write.argtypes = (c.c_void_p, c.POINTER(dma_sg_t), c.c_size_t,
+                              c.c_void_p)
 
 lib.vfu_create_ioeventfd.argtypes = (c.c_void_p, c.c_uint32, c.c_int,
                                      c.c_size_t, c.c_uint32, c.c_uint32,
@@ -707,6 +720,23 @@ def get_reply(sock, expect=0):
     return buf[16:]
 
 
+def send_msg(sock, cmd, msg_type, payload=bytearray(), fds=None, msg_id=None):
+    """
+    Sends a message on the given socket. Can be used on either end of the
+    socket to send commands and replies.
+    """
+    hdr = vfio_user_header(cmd,
+                           size=len(payload),
+                           msg_type=msg_type,
+                           msg_id=msg_id)
+
+    if fds:
+        sock.sendmsg([hdr + payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                        struct.pack("I" * len(fds), *fds))])
+    else:
+        sock.send(hdr + payload)
+
+
 def msg(ctx, sock, cmd, payload=bytearray(), expect=0, fds=None,
         rsp=True, busy=False):
     """
@@ -719,13 +749,7 @@ def msg(ctx, sock, cmd, payload=bytearray(), expect=0, fds=None,
     response: it can later be retrieved, post vfu_device_quiesced(), with
     get_reply().
     """
-    hdr = vfio_user_header(cmd, size=len(payload))
-
-    if fds:
-        sock.sendmsg([hdr + payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
-                                        struct.pack("I" * len(fds), *fds))])
-    else:
-        sock.send(hdr + payload)
+    send_msg(sock, cmd, VFIO_USER_F_TYPE_COMMAND, payload, fds)
 
     if busy:
         vfu_run_ctx(ctx, errno.EBUSY)
@@ -738,9 +762,11 @@ def msg(ctx, sock, cmd, payload=bytearray(), expect=0, fds=None,
     return get_reply(sock, expect=expect)
 
 
-def get_reply_fds(sock, expect=0):
-    """Receives a message from a socket and pulls the returned file descriptors
-       out of the message."""
+def get_msg_fds(sock, expect_type, expect=0):
+    """
+    Receives a message from a socket and pulls the returned file descriptors
+    out of the message.
+    """
     fds = array.array("i")
     data, ancillary, flags, addr = sock.recvmsg(4096,
                                             socket.CMSG_LEN(64 * fds.itemsize))
@@ -755,8 +781,18 @@ def get_reply_fds(sock, expect=0):
         [unpacked_fd] = struct.unpack_from("i", packed_fd, offset=i)
         unpacked_fds.append(unpacked_fd)
     assert len(packed_fd)/4 == len(unpacked_fds)
-    assert (msg_flags & VFIO_USER_F_TYPE_REPLY) != 0
-    return (unpacked_fds, data[16:])
+    assert (msg_flags & 0xf) == expect_type
+    return (unpacked_fds, msg_id, cmd, data[16:])
+
+
+def get_reply_fds(sock, expect=0):
+    """
+    Receives a reply from a socket and returns the included file descriptors
+    and message payload data.
+    """
+    (unpacked_fds, _, _, data) = get_msg_fds(sock, VFIO_USER_F_TYPE_REPLY,
+                                             expect)
+    return (unpacked_fds, data)
 
 
 def msg_fds(ctx, sock, cmd, payload, expect=0, fds=None):
@@ -955,7 +991,7 @@ def prepare_ctx_for_dma(dma_register=__dma_register,
 #
 
 
-msg_id = 1
+next_msg_id = 1
 
 
 @c.CFUNCTYPE(None, c.c_void_p, c.c_int, c.c_char_p)
@@ -971,13 +1007,21 @@ def log(ctx, level, msg):
     print(lvl2str[level] + ": " + msg.decode("utf-8"))
 
 
-def vfio_user_header(cmd, size, no_reply=False, error=False, error_no=0):
-    global msg_id
+def vfio_user_header(cmd,
+                     size,
+                     msg_type=VFIO_USER_F_TYPE_COMMAND,
+                     msg_id=None,
+                     no_reply=False,
+                     error=False,
+                     error_no=0):
+    global next_msg_id
+
+    if msg_id is None:
+        msg_id = next_msg_id
+        next_msg_id += 1
 
     buf = struct.pack("HHIII", msg_id, cmd, SIZEOF_VFIO_USER_HEADER + size,
-                      VFIO_USER_F_TYPE_COMMAND, error_no)
-
-    msg_id += 1
+                      msg_type | (no_reply << 4) | (error << 5), error_no)
 
     return buf
 
@@ -1217,6 +1261,18 @@ def vfu_sgl_get(ctx, sg, iovec, cnt=1, flags=0):
 
 def vfu_sgl_put(ctx, sg, iovec, cnt=1):
     return lib.vfu_sgl_put(ctx, sg, iovec, cnt)
+
+
+def vfu_sgl_read(ctx, sg, cnt=1):
+    data = bytearray(sum([sge.length for sge in sg]))
+    buf = (c.c_byte * len(data)).from_buffer(data)
+    return lib.vfu_sgl_read(ctx, sg, cnt, buf), data
+
+
+def vfu_sgl_write(ctx, sg, cnt=1, data=bytearray()):
+    assert len(data) == sum([sge.length for sge in sg])
+    buf = (c.c_byte * len(data)).from_buffer(data)
+    return lib.vfu_sgl_write(ctx, sg, cnt, buf)
 
 
 def vfu_create_ioeventfd(ctx, region_idx, fd, gpa_offset, size, flags,
