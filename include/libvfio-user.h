@@ -488,6 +488,7 @@ vfu_setup_device_reset_cb(vfu_ctx_t *vfu_ctx, vfu_reset_cb_t *reset);
  */
 typedef struct vfu_dma_info {
     struct iovec iova;
+    uint32_t pasid;
     void *vaddr;
     struct iovec mapping;
     size_t page_size;
@@ -669,6 +670,49 @@ vfu_irq_trigger(vfu_ctx_t *vfu_ctx, uint32_t subindex);
 int
 vfu_addr_to_sgl(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr, size_t len,
                 dma_sg_t *sgl, size_t max_nr_sgs, int prot);
+
+/**
+ * Same as vfu_addr_to_sgl, but accepts a PASID value to indicate the PASID
+ * address space the DMA operation is targeting.
+ */
+int
+vfu_addr_to_sgl_pasid(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
+                      uint32_t pasid, size_t len, dma_sg_t *sgl,
+                      size_t max_nr_sgs, int prot);
+
+/**
+ * Request a range of memory to be made available by the host. This analogous
+ * to a PCIe PRI page request. This command merely conveys the request to the
+ * server and the reply acknowledges reception. The memory regions are made
+ * available asynchronously and will result in a DMA_MAP call for the specified
+ * memory range. Note that the DMA_MAP call may indicate different protection
+ * bits from the ones requested. In particular, if the region can't be
+ * accessed, the protection bits in the DMA_MAP invocation will be all zero.
+ *
+ * TODO: This is a very minimal interface with room for improvement:
+ *  * Matching up exactly one DMA_MAP call to a previous page request is
+ *    brittle. It might be better to instead send the reply to the page request
+ *    operation asynchronously when the request is fully serviced, and then
+ *    invoke a callback.
+ *  * Doing so would also allow incremental DMA_MAP calls, possibly with
+ *    different protection bits, and avoid the need to make calls with zero
+ *    protection bits to indicate failure.
+ *  * Separate DMA_MAP calls will also be necessary if we need to convey the
+ *    translated address to the server. There shouldn't be a strict need, but
+ *    given that real hardware can see the translated address, we should plan
+ *    for a way to supply it in case device implementations require it for
+ *    whatever purpose.
+ *
+ * @vfu_ctx: the libvfio-user context
+ * @dma_addr: the guest I/O virtual address
+ * @pasid: PASID to operate in
+ * @prot: protection as defined in <sys/mman.h>
+ *
+ * @returns success if the host received the request successfully.
+ */
+int
+vfu_page_request(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr, uint32_t pasid,
+                 size_t len, int prot);
 
 /**
  * Populate the given iovec array (accessible in the process's virtual memory),

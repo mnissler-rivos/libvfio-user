@@ -59,6 +59,8 @@
 #include "tran_pipe.h"
 #include "tran_sock.h"
 
+static int msg_id = 1;
+
 static int
 vfu_reset_ctx(vfu_ctx_t *vfu_ctx, int reason);
 
@@ -681,6 +683,7 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
     int fd = -1;
     int ret;
     uint32_t prot = 0;
+    uint32_t pasid = VFIO_USER_PASID_INVALID;
 
     assert(vfu_ctx != NULL);
     assert(msg != NULL);
@@ -710,6 +713,11 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
         dma_map->flags &= ~VFIO_USER_F_DMA_REGION_WRITE;
     }
 
+    if (dma_map->flags & VFIO_USER_F_DMA_PASID) {
+        pasid = dma_map->flags >> 12;
+        dma_map->flags &= ~(VFIO_USER_F_DMA_PASID | (((1 << 20) - 1) << 12));
+    }
+
     if (dma_map->flags != 0) {
         vfu_log(vfu_ctx, LOG_ERR, "bad flags=%#x", dma_map->flags);
         return ERROR_INT(EINVAL);
@@ -723,10 +731,9 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
         }
     }
 
-    ret = dma_controller_add_region(vfu_ctx->dma,
-                                    (vfu_dma_addr_t)(uintptr_t)dma_map->addr,
-                                    dma_map->size, fd, dma_map->offset,
-                                    prot);
+    ret = dma_controller_add_region(
+        vfu_ctx->dma, (vfu_dma_addr_t)(uintptr_t)dma_map->addr, pasid,
+        dma_map->size, fd, dma_map->offset, prot);
     if (ret < 0) {
         vfu_log(vfu_ctx, LOG_ERR, "failed to add DMA region %s: %m", rstr);
         close_safely(&fd);
@@ -804,6 +811,7 @@ handle_dma_unmap(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
     size_t out_size;
     int ret = 0;
     char rstr[1024];
+    uint32_t pasid = VFIO_USER_PASID_INVALID;
 
     assert(vfu_ctx != NULL);
     assert(msg != NULL);
@@ -852,8 +860,13 @@ handle_dma_unmap(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
         }
     }
 
+    if (dma_unmap->flags & VFIO_USER_F_DMA_PASID) {
+        pasid = dma_unmap->flags >> 12;
+    }
+
     ret = dma_controller_remove_region(vfu_ctx->dma,
                                        (vfu_dma_addr_t)(uintptr_t)dma_unmap->addr,
+                                       pasid,
                                        dma_unmap->size,
                                        vfu_ctx->dma_unregister,
                                        vfu_ctx);
@@ -2205,6 +2218,15 @@ EXPORT int
 vfu_addr_to_sgl(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
                 size_t len, dma_sg_t *sgl, size_t max_nr_sgs, int prot)
 {
+    return vfu_addr_to_sgl_pasid(vfu_ctx, dma_addr, VFIO_USER_PASID_INVALID,
+                                 len, sgl, max_nr_sgs, prot);
+}
+
+EXPORT int
+vfu_addr_to_sgl_pasid(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
+                      uint32_t pasid, size_t len, dma_sg_t *sgl,
+                      size_t max_nr_sgs, int prot)
+{
 #ifdef DEBUG
     assert(vfu_ctx != NULL);
 
@@ -2215,7 +2237,27 @@ vfu_addr_to_sgl(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
     quiesce_check_allowed(vfu_ctx, __func__);
 #endif
 
-    return dma_addr_to_sgl(vfu_ctx->dma, dma_addr, len, sgl, max_nr_sgs, prot);
+    return dma_addr_to_sgl(vfu_ctx->dma, dma_addr, pasid, len, sgl, max_nr_sgs,
+                           prot);
+}
+
+EXPORT int
+vfu_page_request(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr, uint32_t pasid,
+                 size_t len, int prot)
+{
+    assert(vfu_ctx != NULL);
+
+    struct vfio_user_dma_page_request page_req;
+
+    page_req.addr = (uintptr_t)dma_addr;
+    page_req.count = len;
+    page_req.flags =
+        ((prot & PROT_READ) ? VFIO_USER_DMA_PAGE_REQUEST_READ : 0) |
+        ((prot & PROT_WRITE) ? VFIO_USER_DMA_PAGE_REQUEST_WRITE : 0);
+    page_req.pasid = pasid;
+    return vfu_ctx->tran->send_msg(
+        vfu_ctx, msg_id++, VFIO_USER_DMA_PAGE_REQUEST, &page_req,
+        sizeof(page_req), NULL, &page_req, sizeof(page_req));
 }
 
 EXPORT int
@@ -2269,7 +2311,6 @@ vfu_dma_transfer(vfu_ctx_t *vfu_ctx, enum vfio_user_command cmd,
     struct vfio_user_dma_region_access *dma_reply;
     struct vfio_user_dma_region_access *dma_req;
     struct vfio_user_dma_region_access dma;
-    static int msg_id = 1;
     size_t remaining;
     size_t count;
     size_t rlen;
@@ -2307,10 +2348,20 @@ vfu_dma_transfer(vfu_ctx_t *vfu_ctx, enum vfio_user_command cmd,
         int ret;
 
         dma_req->addr = (uintptr_t)sg->dma_addr + sg->offset + count;
-        dma_req->count = MIN(remaining, vfu_ctx->client_max_data_xfer_size);
+        size_t req_count = MIN(remaining, vfu_ctx->client_max_data_xfer_size);
+
+        /*
+         * TODO: This would better go into a dedicated field. But, in order to
+         * keep pasid-enabled servers working against pasid-oblivious clients,
+         * this hack retains protocol compatibility.
+         */
+        dma_req->count = req_count;
+        if (sg->pasid != VFIO_USER_PASID_INVALID) {
+            dma_req->count |= ((uint64_t)sg->pasid) << 44;
+        }
 
         if (cmd == VFIO_USER_DMA_WRITE) {
-            memcpy(rbuf + sizeof(*dma_req), data + count, dma_req->count);
+            memcpy(rbuf + sizeof(*dma_req), data + count, req_count);
 
             ret = vfu_ctx->tran->send_msg(vfu_ctx, msg_id++, VFIO_USER_DMA_WRITE,
                                           rbuf, rlen, NULL,
@@ -2347,11 +2398,11 @@ vfu_dma_transfer(vfu_ctx_t *vfu_ctx, enum vfio_user_command cmd,
         }
 
         if (cmd == VFIO_USER_DMA_READ) {
-            memcpy(data + count, rbuf + sizeof(*dma_reply), dma_req->count);
+            memcpy(data + count, rbuf + sizeof(*dma_reply), req_count);
         }
 
-        count += dma_req->count;
-        remaining -= dma_req->count;
+        count += req_count;
+        remaining -= req_count;
     }
 
     free(rbuf);

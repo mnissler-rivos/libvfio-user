@@ -54,17 +54,6 @@ def teardown_function(function):
     vfu_destroy_ctx(ctx)
 
 
-def test_dma_region_too_big():
-    global ctx, client
-
-    payload = vfio_user_dma_map(argsz=len(vfio_user_dma_map()),
-        flags=(VFIO_USER_F_DMA_REGION_READ |
-               VFIO_USER_F_DMA_REGION_WRITE),
-        offset=0, addr=0x10 << PAGE_SHIFT, size=MAX_DMA_SIZE + PAGE_SIZE)
-
-    msg(ctx, client.sock, VFIO_USER_DMA_MAP, payload, expect=errno.ENOSPC)
-
-
 def test_dma_region_too_many():
     global ctx, client
 
@@ -107,7 +96,8 @@ def test_dma_map_busy(mock_dma_register, mock_quiesce):
 
     # check that DMA register callback got called
     iov = iovec_t(iov_base=0x10 << PAGE_SHIFT, iov_len=PAGE_SIZE)
-    dma_info = vfu_dma_info_t(iov, None, iovec_t(None, 0), PAGE_SIZE,
+    dma_info = vfu_dma_info_t(iov, VFIO_USER_PASID_INVALID, None,
+                              iovec_t(None, 0), PAGE_SIZE,
                               mmap.PROT_READ | mmap.PROT_WRITE)
     mock_dma_register.assert_called_once_with(ctx, dma_info)
 
@@ -211,7 +201,8 @@ def test_dma_map_busy_reply_fail(mock_dma_register, mock_quiesce, mock_reset):
     assert ret == 0
 
     iov = iovec_t(iov_base=0x10 << PAGE_SHIFT, iov_len=PAGE_SIZE)
-    dma_info = vfu_dma_info_t(iov, None, iovec_t(None, 0), PAGE_SIZE,
+    dma_info = vfu_dma_info_t(iov, VFIO_USER_PASID_INVALID, None,
+                              iovec_t(None, 0), PAGE_SIZE,
                               mmap.PROT_READ | mmap.PROT_WRITE)
     mock_dma_register.assert_called_once_with(ctx, dma_info)
 

@@ -205,6 +205,8 @@ VFU_REGION_FLAG_ALWAYS_CB = 8
 VFIO_USER_F_DMA_REGION_READ = (1 << 0)
 VFIO_USER_F_DMA_REGION_WRITE = (1 << 1)
 
+VFIO_USER_PASID_INVALID = 0xffffffff
+
 VFIO_DMA_UNMAP_FLAG_GET_DIRTY_BITMAP = (1 << 0)
 
 # enum vfio_user_device_mig_state
@@ -520,6 +522,7 @@ class vfio_user_dma_region_access(Structure):
 class vfu_dma_info_t(Structure):
     _fields_ = [
         ("iova", iovec_t),
+        ("pasid", c.c_uint32),
         ("vaddr", c.c_void_p),
         ("mapping", iovec_t),
         ("page_size", c.c_size_t),
@@ -823,6 +826,7 @@ def get_reply(sock, expect=0):
     buf = sock.recv(4096)
     (msg_id, cmd, msg_size, flags, errno) = struct.unpack("HHIII", buf[0:16])
     assert (flags & VFIO_USER_F_TYPE_REPLY) != 0
+    print(f'errno {errno} vs {expect}')
     assert errno == expect
     return buf[16:]
 
