@@ -70,6 +70,7 @@ enum vfio_user_command {
     VFIO_USER_DEVICE_FEATURE            = 16,
     VFIO_USER_MIG_DATA_READ             = 17,
     VFIO_USER_MIG_DATA_WRITE            = 18,
+    VFIO_USER_DMA_PAGE_REQUEST          = 100,
     VFIO_USER_MAX,
 };
 
@@ -122,6 +123,7 @@ struct vfio_user_dma_map {
     uint32_t argsz;
 #define VFIO_USER_F_DMA_REGION_READ     (1 << 0)
 #define VFIO_USER_F_DMA_REGION_WRITE    (1 << 1)
+#define VFIO_USER_F_DMA_PASID           (1 << 8)
     uint32_t flags;
     uint64_t offset;
     uint64_t addr;
@@ -293,6 +295,17 @@ struct vfio_user_mig_data {
     uint32_t    argsz;
     uint32_t    size;
     uint8_t     data[];
+} __attribute__((packed));
+
+#define VFIO_USER_PASID_INVALID (~((uint32_t)0))
+
+struct vfio_user_dma_page_request {
+    uint64_t addr;
+    uint64_t count;
+    uint32_t flags;
+#define VFIO_USER_DMA_PAGE_REQUEST_READ (1)
+#define VFIO_USER_DMA_PAGE_REQUEST_WRITE (2)
+    uint32_t pasid;
 } __attribute__((packed));
 
 #ifdef __cplusplus

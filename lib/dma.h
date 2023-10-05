@@ -90,6 +90,7 @@ struct dma_sg {
     uint64_t length;
     uint64_t offset;
     bool writeable;
+    uint32_t pasid;
 };
 
 typedef struct {
@@ -125,11 +126,11 @@ dma_controller_destroy(dma_controller_t *dma);
  * - On failure, -1 with errno set.
  */
 MOCK_DECLARE(int, dma_controller_add_region, dma_controller_t *dma,
-             vfu_dma_addr_t dma_addr, uint64_t size, int fd, off_t offset,
-             uint32_t prot);
+             vfu_dma_addr_t dma_addr, uint32_t pasid, uint64_t size, int fd,
+             off_t offset, uint32_t prot);
 
 MOCK_DECLARE(int, dma_controller_remove_region, dma_controller_t *dma,
-             vfu_dma_addr_t dma_addr, size_t size,
+             vfu_dma_addr_t dma_addr, uint32_t pasid, size_t size,
              vfu_dma_unregister_cb_t *dma_unregister, void *data);
 
 MOCK_DECLARE(void, dma_controller_unmap_region, dma_controller_t *dma,
@@ -137,9 +138,9 @@ MOCK_DECLARE(void, dma_controller_unmap_region, dma_controller_t *dma,
 
 // Helper for dma_addr_to_sgl() slow path.
 int
-_dma_addr_sg_split(const dma_controller_t *dma,
-                   vfu_dma_addr_t dma_addr, uint64_t len,
-                   dma_sg_t *sg, int max_nr_sgs, int prot);
+_dma_addr_sg_split(const dma_controller_t *dma, vfu_dma_addr_t dma_addr,
+                   uint32_t pasid, uint64_t len, dma_sg_t *sg, int max_nr_sgs,
+                   int prot);
 
 /* Convert a start address and length to its containing page numbers. */
 static inline void
@@ -204,7 +205,7 @@ _dma_mark_dirty(const dma_controller_t *dma, const dma_memory_region_t *region,
 
 static inline int
 dma_init_sg(const dma_controller_t *dma, dma_sg_t *sg, vfu_dma_addr_t dma_addr,
-            uint64_t len, int prot, int region_index)
+            uint32_t pasid, uint64_t len, int prot, int region_index)
 {
     const dma_memory_region_t *const region = &dma->regions[region_index];
 
@@ -214,6 +215,7 @@ dma_init_sg(const dma_controller_t *dma, dma_sg_t *sg, vfu_dma_addr_t dma_addr,
     }
 
     sg->dma_addr = region->info.iova.iov_base;
+    sg->pasid = pasid;
     sg->region = region_index;
     sg->offset = dma_addr - region->info.iova.iov_base;
     sg->length = len;
@@ -237,7 +239,7 @@ dma_init_sg(const dma_controller_t *dma, dma_sg_t *sg, vfu_dma_addr_t dma_addr,
  */
 static inline int
 dma_addr_to_sgl(const dma_controller_t *dma,
-                vfu_dma_addr_t dma_addr, size_t len,
+                vfu_dma_addr_t dma_addr, uint32_t pasid, size_t len,
                 dma_sg_t *sgl, size_t max_nr_sgs, int prot)
 {
     static __thread int region_hint;
@@ -248,10 +250,11 @@ dma_addr_to_sgl(const dma_controller_t *dma,
 
     // Fast path: single region.
     if (likely(max_nr_sgs > 0 && len > 0 &&
+               pasid == region->info.pasid &&
                dma_addr >= region->info.iova.iov_base &&
                dma_addr + len <= region_end &&
                region_hint < dma->nregions)) {
-        ret = dma_init_sg(dma, sgl, dma_addr, len, prot, region_hint);
+        ret = dma_init_sg(dma, sgl, dma_addr, pasid, len, prot, region_hint);
         if (ret < 0) {
             return ret;
         }
@@ -259,7 +262,7 @@ dma_addr_to_sgl(const dma_controller_t *dma,
         return 1;
     }
     // Slow path: search through regions.
-    cnt = _dma_addr_sg_split(dma, dma_addr, len, sgl, max_nr_sgs, prot);
+    cnt = _dma_addr_sg_split(dma, dma_addr, pasid, len, sgl, max_nr_sgs, prot);
     if (likely(cnt > 0)) {
         region_hint = sgl[0].region;
     }
