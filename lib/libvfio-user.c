@@ -59,6 +59,8 @@
 #include "tran_pipe.h"
 #include "tran_sock.h"
 
+static int msg_id = 1;
+
 static int
 vfu_reset_ctx(vfu_ctx_t *vfu_ctx, int reason);
 
@@ -681,6 +683,7 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
     int fd = -1;
     int ret;
     uint32_t prot = 0;
+    uint32_t pasid = VFIO_USER_PASID_INVALID;
 
     assert(vfu_ctx != NULL);
     assert(msg != NULL);
@@ -710,6 +713,11 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
         dma_map->flags &= ~VFIO_USER_F_DMA_REGION_WRITE;
     }
 
+    if (dma_map->flags & VFIO_USER_F_DMA_PASID) {
+        pasid = dma_map->flags >> 12;
+        dma_map->flags &= ~(VFIO_USER_F_DMA_PASID | (((1 << 20) - 1) << 12));
+    }
+
     if (dma_map->flags != 0) {
         vfu_log(vfu_ctx, LOG_ERR, "bad flags=%#x", dma_map->flags);
         return ERROR_INT(EINVAL);
@@ -723,10 +731,9 @@ handle_dma_map(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
         }
     }
 
-    ret = dma_controller_add_region(vfu_ctx->dma,
-                                    (vfu_dma_addr_t)(uintptr_t)dma_map->addr,
-                                    dma_map->size, fd, dma_map->offset,
-                                    prot);
+    ret = dma_controller_add_region(
+        vfu_ctx->dma, (vfu_dma_addr_t)(uintptr_t)dma_map->addr, pasid,
+        dma_map->size, fd, dma_map->offset, prot);
     if (ret < 0) {
         vfu_log(vfu_ctx, LOG_ERR, "failed to add DMA region %s: %m", rstr);
         close_safely(&fd);
@@ -754,7 +761,12 @@ is_valid_unmap(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
     size_t struct_size = sizeof(*dma_unmap);
     size_t min_argsz = sizeof(*dma_unmap);
 
-    switch (dma_unmap->flags) {
+    uint32_t flags = dma_unmap->flags;
+    if (flags & VFIO_USER_F_DMA_PASID) {
+        flags &= ~(VFIO_USER_F_DMA_PASID | 0xfffff << 12);
+    }
+
+    switch (flags) {
     case VFIO_DMA_UNMAP_FLAG_GET_DIRTY_BITMAP:
         struct_size += sizeof(*dma_unmap->bitmap);
         /*
@@ -804,6 +816,7 @@ handle_dma_unmap(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
     size_t out_size;
     int ret = 0;
     char rstr[1024];
+    uint32_t pasid = VFIO_USER_PASID_INVALID;
 
     assert(vfu_ctx != NULL);
     assert(msg != NULL);
@@ -852,8 +865,13 @@ handle_dma_unmap(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg,
         }
     }
 
+    if (dma_unmap->flags & VFIO_USER_F_DMA_PASID) {
+        pasid = dma_unmap->flags >> 12;
+    }
+
     ret = dma_controller_remove_region(vfu_ctx->dma,
                                        (vfu_dma_addr_t)(uintptr_t)dma_unmap->addr,
+                                       pasid,
                                        dma_unmap->size,
                                        vfu_ctx->dma_unregister,
                                        vfu_ctx);
@@ -1209,6 +1227,49 @@ handle_device_feature(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg)
     return ret;
 }
 
+static int
+handle_page_request_reply(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg)
+{
+    int ret = 0;
+
+    assert(vfu_ctx != NULL);
+    assert(msg != NULL);
+
+    if (msg->in.iov.iov_len < sizeof(struct vfio_user_dma_page_request)) {
+        vfu_log(vfu_ctx, LOG_ERR, "message too short (%ld)",
+                msg->in.iov.iov_len);
+        return ERROR_INT(EINVAL);
+    }
+
+    struct vfio_user_dma_page_request *req = msg->in.iov.iov_base;
+
+    if (vfu_ctx->page_request_completion == NULL) {
+        return ERROR_INT(ENOENT);
+    }
+
+    int completion_status = 0;
+    if (vfu_ctx->pending_page_request.addr != req->addr ||
+            vfu_ctx->pending_page_request.count != req->count ||
+            vfu_ctx->pending_page_request.pasid != req->pasid) {
+        ret = EINVAL;
+        completion_status = EIO;
+    }
+
+    const uint32_t prot_flags_mask = VFIO_USER_DMA_PAGE_REQUEST_READ |
+                                     VFIO_USER_DMA_PAGE_REQUEST_WRITE;
+    if (((vfu_ctx->pending_page_request.flags & ~req->flags) &
+         prot_flags_mask) != 0) {
+        completion_status = EACCES;
+    }
+
+    vfu_page_request_completion_cb_t* cb = vfu_ctx->page_request_completion;
+    vfu_ctx->page_request_completion = NULL;
+
+    cb(vfu_ctx, completion_status);
+
+    return ret != 0 ? ERROR_INT(ret) : 0;
+}
+
 static vfu_msg_t *
 alloc_msg(struct vfio_user_header *hdr, int *fds, size_t nr_fds)
 {
@@ -1377,6 +1438,10 @@ handle_request(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg)
 
     case VFIO_USER_MIG_DATA_WRITE:
         ret = handle_mig_data_write(vfu_ctx, msg);
+        break;
+
+    case VFIO_USER_DMA_PAGE_REQUEST:
+        ret = handle_page_request_reply(vfu_ctx, msg);
         break;
 
     default:
@@ -2205,6 +2270,15 @@ EXPORT int
 vfu_addr_to_sgl(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
                 size_t len, dma_sg_t *sgl, size_t max_nr_sgs, int prot)
 {
+    return vfu_addr_to_sgl_pasid(vfu_ctx, dma_addr, VFIO_USER_PASID_INVALID,
+                                 len, sgl, max_nr_sgs, prot);
+}
+
+EXPORT int
+vfu_addr_to_sgl_pasid(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
+                      uint32_t pasid, size_t len, dma_sg_t *sgl,
+                      size_t max_nr_sgs, int prot)
+{
 #ifdef DEBUG
     assert(vfu_ctx != NULL);
 
@@ -2215,7 +2289,49 @@ vfu_addr_to_sgl(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
     quiesce_check_allowed(vfu_ctx, __func__);
 #endif
 
-    return dma_addr_to_sgl(vfu_ctx->dma, dma_addr, len, sgl, max_nr_sgs, prot);
+    return dma_addr_to_sgl(vfu_ctx->dma, dma_addr, pasid, len, sgl, max_nr_sgs,
+                           prot);
+}
+
+EXPORT int
+vfu_page_request(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr, uint32_t pasid,
+                 size_t len, int prot,
+                 vfu_page_request_completion_cb_t* completion)
+{
+    assert(vfu_ctx != NULL);
+    assert(completion != NULL);
+
+    // Hack: In this proof of concept implementation, page request completion
+    // is signaled by the client by sending a VFIO_USER_PAGE_REQUEST command
+    // back to the server. To match this up, we store the pending page request
+    // and the callback in vfu_ctx. Thus, there can only be a single page
+    // request in flight at a time.
+    //
+    // A proper implementation would rather use an asynchronous reply to the
+    // server-to-client VFIO_USER_PAGE_REQUEST command to indicate completion.
+    // For this to work, the transaction layer will have to be able to pass
+    // back asynchronous replies, which it is currently unable to do (i.e. the
+    // synchronous, blocking tran->send_msg is unable to deal with incoming
+    // asynchronous replies right now). So, in order to manage the scope of
+    // this proof of concept, we are cutting this corner to avoid major
+    // transaction layer surgery.
+    if (vfu_ctx->page_request_completion != NULL) {
+        return ERROR_INT(EBUSY);
+    }
+
+    vfu_ctx->page_request_completion = completion;
+    vfu_ctx->pending_page_request.addr = (uintptr_t)dma_addr;
+    vfu_ctx->pending_page_request.count = len;
+    vfu_ctx->pending_page_request.flags =
+        ((prot & PROT_READ) ? VFIO_USER_DMA_PAGE_REQUEST_READ : 0) |
+        ((prot & PROT_WRITE) ? VFIO_USER_DMA_PAGE_REQUEST_WRITE : 0);
+    vfu_ctx->pending_page_request.pasid = pasid;
+
+    struct vfio_user_dma_page_request reply;
+    return vfu_ctx->tran->send_msg(
+        vfu_ctx, msg_id++, VFIO_USER_DMA_PAGE_REQUEST,
+        &vfu_ctx->pending_page_request, sizeof(vfu_ctx->pending_page_request),
+        NULL, &reply, sizeof(reply));
 }
 
 EXPORT int
@@ -2269,7 +2385,6 @@ vfu_dma_transfer(vfu_ctx_t *vfu_ctx, enum vfio_user_command cmd,
     struct vfio_user_dma_region_access *dma_reply;
     struct vfio_user_dma_region_access *dma_req;
     struct vfio_user_dma_region_access dma;
-    static int msg_id = 1;
     size_t remaining;
     size_t count;
     size_t rlen;
@@ -2307,10 +2422,20 @@ vfu_dma_transfer(vfu_ctx_t *vfu_ctx, enum vfio_user_command cmd,
         int ret;
 
         dma_req->addr = (uintptr_t)sg->dma_addr + sg->offset + count;
-        dma_req->count = MIN(remaining, vfu_ctx->client_max_data_xfer_size);
+        size_t req_count = MIN(remaining, vfu_ctx->client_max_data_xfer_size);
+
+        /*
+         * TODO: This would better go into a dedicated field. But, in order to
+         * keep pasid-enabled servers working against pasid-oblivious clients,
+         * this hack retains protocol compatibility.
+         */
+        dma_req->count = req_count;
+        if (sg->pasid != VFIO_USER_PASID_INVALID) {
+            dma_req->count |= ((uint64_t)sg->pasid) << 44;
+        }
 
         if (cmd == VFIO_USER_DMA_WRITE) {
-            memcpy(rbuf + sizeof(*dma_req), data + count, dma_req->count);
+            memcpy(rbuf + sizeof(*dma_req), data + count, req_count);
 
             ret = vfu_ctx->tran->send_msg(vfu_ctx, msg_id++,
                                           VFIO_USER_DMA_WRITE, rbuf,
@@ -2348,11 +2473,11 @@ vfu_dma_transfer(vfu_ctx_t *vfu_ctx, enum vfio_user_command cmd,
         }
 
         if (cmd == VFIO_USER_DMA_READ) {
-            memcpy(data + count, rbuf + sizeof(*dma_reply), dma_req->count);
+            memcpy(data + count, rbuf + sizeof(*dma_reply), req_count);
         }
 
-        count += dma_req->count;
-        remaining -= dma_req->count;
+        count += req_count;
+        remaining -= req_count;
     }
 
     free(rbuf);

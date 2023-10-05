@@ -147,6 +147,7 @@ test_dma_map_without_fd(void **state UNUSED)
     will_return(dma_controller_add_region, 0);
     expect_value(dma_controller_add_region, dma, vfu_ctx.dma);
     expect_value(dma_controller_add_region, dma_addr, dma_map.addr);
+    expect_value(dma_controller_add_region, pasid, VFIO_USER_PASID_INVALID);
     expect_value(dma_controller_add_region, size, dma_map.size);
     expect_value(dma_controller_add_region, fd, -1);
     expect_value(dma_controller_add_region, offset, dma_map.offset);
@@ -190,6 +191,7 @@ test_dma_map_return_value(void **state UNUSED)
     patch("dma_controller_add_region");
     expect_value(dma_controller_add_region, dma, (uintptr_t)vfu_ctx.dma);
     expect_value(dma_controller_add_region, dma_addr, dma_map.addr);
+    expect_value(dma_controller_add_region, pasid, VFIO_USER_PASID_INVALID);
     expect_value(dma_controller_add_region, size, dma_map.size);
     expect_value(dma_controller_add_region, fd, -1);
     expect_value(dma_controller_add_region, offset, dma_map.offset);
@@ -218,12 +220,15 @@ test_handle_dma_unmap(void **state UNUSED)
     vfu_ctx.dma->nregions = 3;
     vfu_ctx.dma->regions[0].info.iova.iov_base = (void *)0x1000;
     vfu_ctx.dma->regions[0].info.iova.iov_len = 0x1000;
+    vfu_ctx.dma->regions[0].info.pasid = VFIO_USER_PASID_INVALID;
     vfu_ctx.dma->regions[0].fd = -1;
     vfu_ctx.dma->regions[1].info.iova.iov_base = (void *)0x4000;
     vfu_ctx.dma->regions[1].info.iova.iov_len = 0x2000;
+    vfu_ctx.dma->regions[1].info.pasid = VFIO_USER_PASID_INVALID;
     vfu_ctx.dma->regions[1].fd = -1;
     vfu_ctx.dma->regions[2].info.iova.iov_base = (void *)0x8000;
     vfu_ctx.dma->regions[2].info.iova.iov_len = 0x3000;
+    vfu_ctx.dma->regions[2].info.pasid = VFIO_USER_PASID_INVALID;
     vfu_ctx.dma->regions[2].fd = -1;
 
     vfu_ctx.dma_unregister = mock_dma_unregister;
@@ -256,7 +261,8 @@ test_dma_controller_add_region_no_fd(void **state UNUSED)
     int fd = -1;
 
     assert_int_equal(0, dma_controller_add_region(vfu_ctx.dma, dma_addr,
-                                                  size, fd, offset, PROT_NONE));
+                                                  VFIO_USER_PASID_INVALID, size,
+                                                  fd, offset, PROT_NONE));
     assert_int_equal(1, vfu_ctx.dma->nregions);
     r = &vfu_ctx.dma->regions[0];
     assert_ptr_equal(NULL, r->info.vaddr);
@@ -276,6 +282,7 @@ test_dma_controller_remove_region_mapped(void **state UNUSED)
     vfu_ctx.dma->nregions = 1;
     vfu_ctx.dma->regions[0].info.iova.iov_base = (void *)0xdeadbeef;
     vfu_ctx.dma->regions[0].info.iova.iov_len = 0x100;
+    vfu_ctx.dma->regions[0].info.pasid = VFIO_USER_PASID_INVALID;
     vfu_ctx.dma->regions[0].info.mapping.iov_base = (void *)0xcafebabe;
     vfu_ctx.dma->regions[0].info.mapping.iov_len = 0x1000;
     vfu_ctx.dma->regions[0].info.vaddr = (void *)0xcafebabe;
@@ -287,9 +294,10 @@ test_dma_controller_remove_region_mapped(void **state UNUSED)
     patch("dma_controller_unmap_region");
     expect_value(dma_controller_unmap_region, dma, vfu_ctx.dma);
     expect_value(dma_controller_unmap_region, region, &vfu_ctx.dma->regions[0]);
-    assert_int_equal(0,
-        dma_controller_remove_region(vfu_ctx.dma, (void *)0xdeadbeef, 0x100,
-            mock_dma_unregister, &vfu_ctx));
+    assert_int_equal(
+        0, dma_controller_remove_region(vfu_ctx.dma, (void *)0xdeadbeef,
+                                        VFIO_USER_PASID_INVALID, 0x100,
+                                        mock_dma_unregister, &vfu_ctx));
 }
 
 static void
@@ -298,15 +306,17 @@ test_dma_controller_remove_region_unmapped(void **state UNUSED)
     vfu_ctx.dma->nregions = 1;
     vfu_ctx.dma->regions[0].info.iova.iov_base = (void *)0xdeadbeef;
     vfu_ctx.dma->regions[0].info.iova.iov_len = 0x100;
+    vfu_ctx.dma->regions[0].info.pasid = VFIO_USER_PASID_INVALID;
     vfu_ctx.dma->regions[0].fd = -1;
 
     expect_value(mock_dma_unregister, vfu_ctx, &vfu_ctx);
     expect_check(mock_dma_unregister, info, check_dma_info,
                  &vfu_ctx.dma->regions[0].info);
     patch("dma_controller_unmap_region");
-    assert_int_equal(0,
-        dma_controller_remove_region(vfu_ctx.dma, (void *)0xdeadbeef, 0x100,
-            mock_dma_unregister, &vfu_ctx));
+    assert_int_equal(
+        0, dma_controller_remove_region(vfu_ctx.dma, (void *)0xdeadbeef,
+                                        VFIO_USER_PASID_INVALID, 0x100,
+                                        mock_dma_unregister, &vfu_ctx));
 }
 
 static void
@@ -321,46 +331,49 @@ test_dma_addr_to_sgl(void **state UNUSED)
     r = &vfu_ctx.dma->regions[0];
     r->info.iova.iov_base = (void *)0x1000;
     r->info.iova.iov_len = 0x4000;
+    r->info.pasid = VFIO_USER_PASID_INVALID;
     r->info.vaddr = (void *)0xdeadbeef;
 
     /* fast path, region hint hit */
     r->info.prot = PROT_WRITE;
     ret = dma_addr_to_sgl(vfu_ctx.dma, (vfu_dma_addr_t)0x2000,
-                          0x400, sg, 1, PROT_READ);
+                          VFIO_USER_PASID_INVALID, 0x400, sg, 1, PROT_READ);
     assert_int_equal(1, ret);
     assert_int_equal(r->info.iova.iov_base, sg[0].dma_addr);
     assert_int_equal(0, sg[0].region);
     assert_int_equal(0x2000 - (long)r->info.iova.iov_base,
                      sg[0].offset);
     assert_int_equal(0x400, sg[0].length);
+    assert_int_equal(VFIO_USER_PASID_INVALID, sg[0].pasid);
     assert_true(vfu_sg_is_mappable(&vfu_ctx, &sg[0]));
 
     errno = 0;
     r->info.prot = PROT_WRITE;
     ret = dma_addr_to_sgl(vfu_ctx.dma, (vfu_dma_addr_t)0x6000,
-                          0x400, sg, 1, PROT_READ);
+                          VFIO_USER_PASID_INVALID, 0x400, sg, 1, PROT_READ);
     assert_int_equal(-1, ret);
     assert_int_equal(ENOENT, errno);
 
     r->info.prot = PROT_READ;
     ret = dma_addr_to_sgl(vfu_ctx.dma, (vfu_dma_addr_t)0x2000,
-                          0x400, sg, 1, PROT_WRITE);
+                          VFIO_USER_PASID_INVALID, 0x400, sg, 1, PROT_WRITE);
     assert_int_equal(-1, ret);
     assert_int_equal(EACCES, errno);
 
     r->info.prot = PROT_READ|PROT_WRITE;
     ret = dma_addr_to_sgl(vfu_ctx.dma, (vfu_dma_addr_t)0x2000,
-                          0x400, sg, 1, PROT_READ);
+                          VFIO_USER_PASID_INVALID, 0x400, sg, 1, PROT_READ);
     assert_int_equal(1, ret);
 
     vfu_ctx.dma->nregions = 2;
     r1 = &vfu_ctx.dma->regions[1];
     r1->info.iova.iov_base = (void *)0x5000;
     r1->info.iova.iov_len = 0x2000;
+    r1->info.pasid = VFIO_USER_PASID_INVALID;
     r1->info.vaddr = (void *)0xcafebabe;
     r1->info.prot = PROT_WRITE;
     ret = dma_addr_to_sgl(vfu_ctx.dma, (vfu_dma_addr_t)0x1000,
-                          0x5000, sg, 2, PROT_READ);
+                          VFIO_USER_PASID_INVALID, 0x5000, sg, 2, PROT_READ);
     assert_int_equal(2, ret);
     assert_int_equal(0x4000, sg[0].length);
     assert_int_equal(r->info.iova.iov_base, sg[0].dma_addr);

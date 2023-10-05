@@ -112,17 +112,17 @@ unpatch_all(void)
 }
 
 int
-dma_controller_add_region(dma_controller_t *dma, void *dma_addr,
-                          uint64_t size, int fd, off_t offset,
-                          uint32_t prot)
+dma_controller_add_region(dma_controller_t *dma, void *dma_addr, uint32_t pasid,
+                          uint64_t size, int fd, off_t offset, uint32_t prot)
 {
     if (!is_patched("dma_controller_add_region")) {
-        return __real_dma_controller_add_region(dma, dma_addr, size, fd, offset,
-                                                prot);
+        return __real_dma_controller_add_region(dma, dma_addr, pasid, size, fd,
+                                                offset, prot);
     }
 
     check_expected_ptr(dma);
     check_expected_ptr(dma_addr);
+    check_expected_ptr(pasid);
     check_expected(size);
     check_expected(fd);
     check_expected(offset);
@@ -133,17 +133,18 @@ dma_controller_add_region(dma_controller_t *dma, void *dma_addr,
 
 int
 dma_controller_remove_region(dma_controller_t *dma,
-                             void *dma_addr, size_t size,
+                             void *dma_addr, uint32_t pasid, size_t size,
                              vfu_dma_unregister_cb_t *dma_unregister,
                              void *data)
 {
     if (!is_patched("dma_controller_remove_region")) {
-        return __real_dma_controller_remove_region(dma, dma_addr, size,
+        return __real_dma_controller_remove_region(dma, dma_addr, pasid, size,
                                                    dma_unregister, data);
     }
 
     check_expected(dma);
     check_expected(dma_addr);
+    check_expected(pasid);
     check_expected(size);
     check_expected(dma_unregister);
     check_expected(data);

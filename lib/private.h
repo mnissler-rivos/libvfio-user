@@ -182,6 +182,9 @@ struct vfu_ctx {
     vfu_dev_type_t          dev_type;
 
     ssize_t                 pci_cap_exp_off;
+
+    vfu_page_request_completion_cb_t *page_request_completion;
+    struct vfio_user_dma_page_request pending_page_request;
 };
 
 typedef struct ioeventfd {

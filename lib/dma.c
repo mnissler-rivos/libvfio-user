@@ -144,10 +144,9 @@ array_remove(void *array, size_t elem_size, size_t index, int *nr_elemsp)
 
 /* FIXME not thread safe */
 int
-MOCK_DEFINE(dma_controller_remove_region)(dma_controller_t *dma,
-                                          vfu_dma_addr_t dma_addr, size_t size,
-                                          vfu_dma_unregister_cb_t *dma_unregister,
-                                          void *data)
+MOCK_DEFINE(dma_controller_remove_region)(
+    dma_controller_t *dma, vfu_dma_addr_t dma_addr, uint32_t pasid, size_t size,
+    vfu_dma_unregister_cb_t *dma_unregister, void *data)
 {
     int idx;
     dma_memory_region_t *region;
@@ -157,7 +156,8 @@ MOCK_DEFINE(dma_controller_remove_region)(dma_controller_t *dma,
     for (idx = 0; idx < dma->nregions; idx++) {
         region = &dma->regions[idx];
         if (region->info.iova.iov_base != dma_addr ||
-            region->info.iova.iov_len != size) {
+            region->info.iova.iov_len != size ||
+            region->info.pasid != pasid) {
             continue;
         }
 
@@ -274,8 +274,9 @@ dirty_page_logging_start_on_region(dma_memory_region_t *region, size_t pgsize)
 
 int
 MOCK_DEFINE(dma_controller_add_region)(dma_controller_t *dma,
-                                       vfu_dma_addr_t dma_addr, uint64_t size,
-                                       int fd, off_t offset, uint32_t prot)
+                                       vfu_dma_addr_t dma_addr, uint32_t pasid,
+                                       uint64_t size, int fd, off_t offset,
+                                       uint32_t prot)
 {
     dma_memory_region_t *region;
     int page_size = 0;
@@ -287,14 +288,23 @@ MOCK_DEFINE(dma_controller_add_region)(dma_controller_t *dma,
     snprintf(rstr, sizeof(rstr), "[%p, %p) fd=%d offset=%#llx prot=%#x",
              dma_addr, dma_addr + size, fd, (ull_t)offset, prot);
 
-    if (size > dma->max_size) {
-        vfu_log(dma->vfu_ctx, LOG_ERR, "DMA region size %llu > max %zu",
-                (unsigned long long)size, dma->max_size);
-        return ERROR_INT(ENOSPC);
-    }
+    // Upstream has a size limit check here. With address translation, that
+    // check does not make a lot of sense, since there is no such thing as a
+    // RAM region, and it is generally neither suitable nor practical to
+    // propagate *all* IOMMU mappings. Thus, the host would configure a region
+    // for whatever portion of the address space is used to allocate I/O
+    // virtual addresses - which is the entire address space in the limit.
+    //
+    // Note that things are different with ATS (and possibly PRI) enabled: In
+    // that case it is OK to start with no DMA regions at all, and request
+    // mappings on demand via vfu_page_request.
 
     for (idx = 0; idx < dma->nregions; idx++) {
         region = &dma->regions[idx];
+
+        if (region->info.pasid != pasid) {
+            continue;
+        }
 
         /* First check if this is the same exact region. */
         if (region->info.iova.iov_base == dma_addr &&
@@ -316,11 +326,8 @@ MOCK_DEFINE(dma_controller_add_region)(dma_controller_t *dma,
                         "existing=%d", rstr, region->fd);
                 return ERROR_INT(EINVAL);
             }
-            if (region->info.prot != prot) {
-                vfu_log(dma->vfu_ctx, LOG_ERR, "bad prot for new DMA region "
-                        "%s; existing=%#x", rstr, region->info.prot);
-                return ERROR_INT(EINVAL);
-            }
+            /* Allow protection changes. */
+            region->info.prot = prot;
             return idx;
         }
 
@@ -357,6 +364,7 @@ MOCK_DEFINE(dma_controller_add_region)(dma_controller_t *dma,
 
     region->info.iova.iov_base = (void *)dma_addr;
     region->info.iova.iov_len = size;
+    region->info.pasid = pasid;
     region->info.page_size = page_size;
     region->info.prot = prot;
     region->offset = offset;
@@ -397,9 +405,9 @@ MOCK_DEFINE(dma_controller_add_region)(dma_controller_t *dma,
 }
 
 int
-_dma_addr_sg_split(const dma_controller_t *dma,
-                   vfu_dma_addr_t dma_addr, uint64_t len,
-                   dma_sg_t *sg, int max_nr_sgs, int prot)
+_dma_addr_sg_split(const dma_controller_t *dma, vfu_dma_addr_t dma_addr,
+                   uint32_t pasid, uint64_t len, dma_sg_t *sg, int max_nr_sgs,
+                   int prot)
 {
     int idx;
     int cnt = 0, ret;
@@ -412,11 +420,16 @@ _dma_addr_sg_split(const dma_controller_t *dma,
             vfu_dma_addr_t region_start = region->info.iova.iov_base;
             vfu_dma_addr_t region_end = iov_end(&region->info.iova);
 
+            if (region->info.pasid != pasid) {
+                continue;
+            }
+
             while (dma_addr >= region_start && dma_addr < region_end) {
                 size_t region_len = MIN((uint64_t)(region_end - dma_addr), len);
 
                 if (cnt < max_nr_sgs) {
-                    ret = dma_init_sg(dma, &sg[cnt], dma_addr, region_len, prot, idx);
+                    ret = dma_init_sg(dma, &sg[cnt], dma_addr, pasid,
+                                      region_len, prot, idx);
                     if (ret < 0) {
                         return ret;
                     }
@@ -694,7 +707,8 @@ dma_controller_dirty_page_get(dma_controller_t *dma, vfu_dma_addr_t addr,
      * is purely for simplifying the implementation. We MUST allow arbitrary
      * IOVAs.
      */
-    ret = dma_addr_to_sgl(dma, addr, len, &sg, 1, PROT_NONE);
+    ret = dma_addr_to_sgl(dma, addr, VFIO_USER_PASID_INVALID, len, &sg, 1,
+                          PROT_NONE);
     if (unlikely(ret != 1)) {
         vfu_log(dma->vfu_ctx, LOG_DEBUG, "failed to translate %#llx-%#llx: %m",
                 (unsigned long long)(uintptr_t)addr,
