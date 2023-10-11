@@ -60,6 +60,7 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
+#include <sys/param.h>
 
 #include "common.h"
 #include "libvfio-user.h"
@@ -83,6 +84,8 @@ cap_size(vfu_ctx_t *vfu_ctx, void *data, bool extended)
         uint16_t id = ((struct pcie_ext_cap_hdr *)data)->id;
 
         switch (id) {
+        case PCI_EXT_CAP_ID_ATS:
+            return VFIO_USER_PCI_EXT_CAP_ATS_SIZEOF;
         case PCI_EXT_CAP_ID_DSN:
             return PCI_EXT_CAP_DSN_SIZEOF;
         case PCI_EXT_CAP_ID_VNDR:
@@ -447,6 +450,32 @@ cap_write_vendor(vfu_ctx_t *vfu_ctx, struct pci_cap *cap UNUSED, char *buf,
 }
 
 static ssize_t
+ext_cap_write_ats(vfu_ctx_t *vfu_ctx, struct pci_cap *cap, char *buf,
+                  size_t count, loff_t offset)
+{
+    struct atscap *ats = cap_data(vfu_ctx, cap);
+    struct atscap new_ats = *ats;
+
+    assert((size_t)offset >= cap->off);
+    assert((size_t)offset < cap->off + cap->size);
+    offset -= cap->off;
+    count = MIN(count, cap->size - offset);
+    memcpy((uint8_t*)&new_ats + offset, buf, count);
+
+    ats->control.smallest_translation_unit =
+        new_ats.control.smallest_translation_unit;
+    if (ats->capability.ats_memory_attributes_supported) {
+        ats->control.ats_memory_attributes_default =
+            new_ats.control.ats_memory_attributes_default;
+        ats->control.ats_memory_attributes_enable =
+            new_ats.control.ats_memory_attributes_enable;
+    }
+    ats->control.enable = new_ats.control.enable;
+
+    return count;
+}
+
+static ssize_t
 ext_cap_write_dsn(vfu_ctx_t *vfu_ctx, struct pci_cap *cap, char *buf UNUSED,
                   size_t count UNUSED, loff_t offset UNUSED)
 {
@@ -705,6 +734,10 @@ vfu_pci_add_capability(vfu_ctx_t *vfu_ctx, size_t pos, int flags, void *data)
         cap.hdr_size = sizeof(struct pcie_ext_cap_hdr);
 
         switch (cap.id) {
+        case PCI_EXT_CAP_ID_ATS:
+            cap.name = "Address Translation Services";
+            cap.cb = ext_cap_write_ats;
+            break;
         case PCI_EXT_CAP_ID_DSN:
             cap.name = "Device Serial Number";
             cap.cb = ext_cap_write_dsn;
