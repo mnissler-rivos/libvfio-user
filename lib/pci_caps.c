@@ -88,6 +88,8 @@ cap_size(vfu_ctx_t *vfu_ctx, void *data, bool extended)
             return VFIO_USER_PCI_EXT_CAP_ATS_SIZEOF;
         case PCI_EXT_CAP_ID_DSN:
             return PCI_EXT_CAP_DSN_SIZEOF;
+        case PCI_EXT_CAP_ID_PASID:
+            return VFIO_USER_PCI_EXT_CAP_PASID_SIZEOF;
         case PCI_EXT_CAP_ID_PRI:
             return VFIO_USER_PCI_EXT_CAP_PRI_SIZEOF;
         case PCI_EXT_CAP_ID_VNDR:
@@ -486,6 +488,33 @@ ext_cap_write_dsn(vfu_ctx_t *vfu_ctx, struct pci_cap *cap, char *buf UNUSED,
 }
 
 static ssize_t
+ext_cap_write_pasid(vfu_ctx_t *vfu_ctx, struct pci_cap *cap, char *buf,
+                    size_t count, loff_t offset)
+{
+    struct pasidcap *pasid = cap_data(vfu_ctx, cap);
+    struct pasidcap new_pasid = *pasid;
+
+    assert((size_t)offset >= cap->off);
+    assert((size_t)offset < cap->off + cap->size);
+    offset -= cap->off;
+    count = MIN(count, cap->size - offset);
+    memcpy((uint8_t*)&new_pasid + offset, buf, count);
+
+    pasid->control.enable = new_pasid.control.enable;
+    pasid->control.execute_permission_enable =
+        new_pasid.control.execute_permission_enable &
+        pasid->capability.execute_permission_supported;
+    pasid->control.privileged_mode_enable =
+        new_pasid.control.privileged_mode_enable &
+        pasid->capability.privileged_mode_supported;
+    pasid->control.translate_with_pasid_enable =
+        new_pasid.control.translate_with_pasid_enable &
+        pasid->capability.translate_with_pasid_supported;
+
+    return count;
+}
+
+static ssize_t
 ext_cap_write_pri(vfu_ctx_t *vfu_ctx, struct pci_cap *cap, char *buf,
                   size_t count, loff_t offset)
 {
@@ -764,6 +793,10 @@ vfu_pci_add_capability(vfu_ctx_t *vfu_ctx, size_t pos, int flags, void *data)
         case PCI_EXT_CAP_ID_DSN:
             cap.name = "Device Serial Number";
             cap.cb = ext_cap_write_dsn;
+            break;
+        case PCI_EXT_CAP_ID_PASID:
+            cap.name = "Process Address Space ID";
+            cap.cb = ext_cap_write_pasid;
             break;
         case PCI_EXT_CAP_ID_PRI:
             cap.name = "Page Request Interface";
