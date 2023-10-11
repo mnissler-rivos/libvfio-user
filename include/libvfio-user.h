@@ -52,6 +52,7 @@
 #include "pci_caps/dsn.h"
 #include "pci_caps/msi.h"
 #include "pci_caps/msix.h"
+#include "pci_caps/pasid.h"
 #include "pci_caps/pm.h"
 #include "pci_caps/pri.h"
 #include "pci_caps/px.h"
