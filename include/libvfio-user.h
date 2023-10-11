@@ -53,6 +53,7 @@
 #include "pci_caps/msi.h"
 #include "pci_caps/msix.h"
 #include "pci_caps/pm.h"
+#include "pci_caps/pri.h"
 #include "pci_caps/px.h"
 #include "pci_defs.h"
 #include "vfio-user.h"
