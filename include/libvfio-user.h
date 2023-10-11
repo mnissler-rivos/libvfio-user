@@ -48,6 +48,7 @@
 #include <syslog.h>
 #include <sys/queue.h>
 
+#include "pci_caps/ats.h"
 #include "pci_caps/dsn.h"
 #include "pci_caps/msi.h"
 #include "pci_caps/msix.h"
