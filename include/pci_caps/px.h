@@ -163,6 +163,9 @@ struct pxdcap2 {
     uint32_t nprpr:1;
     uint32_t ltrs:1;
     uint32_t tphcs:2;
+    uint32_t undef:2;
+    uint32_t tbtcs:1;
+    uint32_t tbtrs:1;
     uint32_t obffs:2;
     uint32_t effs:1;
     uint32_t eetps:1;
