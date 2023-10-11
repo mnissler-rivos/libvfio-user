@@ -88,6 +88,8 @@ cap_size(vfu_ctx_t *vfu_ctx, void *data, bool extended)
             return VFIO_USER_PCI_EXT_CAP_ATS_SIZEOF;
         case PCI_EXT_CAP_ID_DSN:
             return PCI_EXT_CAP_DSN_SIZEOF;
+        case PCI_EXT_CAP_ID_PRI:
+            return VFIO_USER_PCI_EXT_CAP_PRI_SIZEOF;
         case PCI_EXT_CAP_ID_VNDR:
             return ((struct pcie_ext_cap_vsc_hdr *)data)->len;
         default:
@@ -484,6 +486,27 @@ ext_cap_write_dsn(vfu_ctx_t *vfu_ctx, struct pci_cap *cap, char *buf UNUSED,
 }
 
 static ssize_t
+ext_cap_write_pri(vfu_ctx_t *vfu_ctx, struct pci_cap *cap, char *buf,
+                  size_t count, loff_t offset)
+{
+    struct pricap *pri = cap_data(vfu_ctx, cap);
+    struct pricap new_pri = *pri;
+
+    assert((size_t)offset >= cap->off);
+    assert((size_t)offset < cap->off + cap->size);
+    offset -= cap->off;
+    count = MIN(count, cap->size - offset);
+    memcpy((uint8_t*)&new_pri + offset, buf, count);
+
+    pri->control.enable = new_pri.control.enable;
+    pri->status.response_failure &= !new_pri.status.response_failure;
+    pri->status.unexpected_group_index &=
+        !new_pri.status.unexpected_group_index;
+
+    return count;
+}
+
+static ssize_t
 ext_cap_write_vendor(vfu_ctx_t *vfu_ctx, struct pci_cap *cap UNUSED, char *buf,
                      size_t count, loff_t offset)
 {
@@ -741,6 +764,10 @@ vfu_pci_add_capability(vfu_ctx_t *vfu_ctx, size_t pos, int flags, void *data)
         case PCI_EXT_CAP_ID_DSN:
             cap.name = "Device Serial Number";
             cap.cb = ext_cap_write_dsn;
+            break;
+        case PCI_EXT_CAP_ID_PRI:
+            cap.name = "Page Request Interface";
+            cap.cb = ext_cap_write_pri;
             break;
         case PCI_EXT_CAP_ID_VNDR:
             cap.name = "Vendor-Specific";

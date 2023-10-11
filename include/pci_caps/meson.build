@@ -6,6 +6,7 @@ libvfio_user_pci_caps_includes = files(
     'msi.h',
     'msix.h',
     'pm.h',
+    'pri.h',
     'px.h',
 )
 
