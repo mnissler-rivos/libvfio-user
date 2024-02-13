@@ -1226,6 +1226,49 @@ handle_device_feature(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg)
     return ret;
 }
 
+static int
+handle_page_request_reply(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg)
+{
+    int ret = 0;
+
+    assert(vfu_ctx != NULL);
+    assert(msg != NULL);
+
+    if (msg->in.iov.iov_len < sizeof(struct vfio_user_dma_page_request)) {
+        vfu_log(vfu_ctx, LOG_ERR, "message too short (%ld)",
+                msg->in.iov.iov_len);
+        return ERROR_INT(EINVAL);
+    }
+
+    struct vfio_user_dma_page_request *req = msg->in.iov.iov_base;
+
+    if (vfu_ctx->page_request_completion == NULL) {
+        return ERROR_INT(ENOENT);
+    }
+
+    int completion_status = 0;
+    if (vfu_ctx->pending_page_request.addr != req->addr ||
+            vfu_ctx->pending_page_request.count != req->count ||
+            vfu_ctx->pending_page_request.pasid != req->pasid) {
+        ret = EINVAL;
+        completion_status = EIO;
+    }
+
+    const uint32_t prot_flags_mask = VFIO_USER_DMA_PAGE_REQUEST_READ |
+                                     VFIO_USER_DMA_PAGE_REQUEST_WRITE;
+    if (((vfu_ctx->pending_page_request.flags & ~req->flags) &
+         prot_flags_mask) != 0) {
+        completion_status = EACCES;
+    }
+
+    vfu_page_request_completion_cb_t* cb = vfu_ctx->page_request_completion;
+    vfu_ctx->page_request_completion = NULL;
+
+    cb(vfu_ctx, completion_status);
+
+    return ret != 0 ? ERROR_INT(ret) : 0;
+}
+
 static vfu_msg_t *
 alloc_msg(struct vfio_user_header *hdr, int *fds, size_t nr_fds)
 {
@@ -1394,6 +1437,10 @@ handle_request(vfu_ctx_t *vfu_ctx, vfu_msg_t *msg)
 
     case VFIO_USER_MIG_DATA_WRITE:
         ret = handle_mig_data_write(vfu_ctx, msg);
+        break;
+
+    case VFIO_USER_DMA_PAGE_REQUEST:
+        ret = handle_page_request_reply(vfu_ctx, msg);
         break;
 
     default:
@@ -2258,21 +2305,43 @@ vfu_addr_to_sgl_pasid(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
 
 EXPORT int
 vfu_page_request(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr, uint32_t pasid,
-                 size_t len, int prot)
+                 size_t len, int prot,
+                 vfu_page_request_completion_cb_t* completion)
 {
     assert(vfu_ctx != NULL);
+    assert(completion != NULL);
 
-    struct vfio_user_dma_page_request page_req;
+    // Hack: In this proof of concept implementation, page request completion
+    // is signaled by the client by sending a VFIO_USER_PAGE_REQUEST command
+    // back to the server. To match this up, we store the pending page request
+    // and the callback in vfu_ctx. Thus, there can only be a single page
+    // request in flight at a time.
+    //
+    // A proper implementation would rather use an asynchronous reply to the
+    // server-to-client VFIO_USER_PAGE_REQUEST command to indicate completion.
+    // For this to work, the transaction layer will have to be able to pass
+    // back asynchronous replies, which it is currently unable to do (i.e. the
+    // synchronous, blocking tran->send_msg is unable to deal with incoming
+    // asynchronous replies right now). So, in order to manage the scope of
+    // this proof of concept, we are cutting this corner to avoid major
+    // transaction layer surgery.
+    if (vfu_ctx->page_request_completion != NULL) {
+        return ERROR_INT(EBUSY);
+    }
 
-    page_req.addr = (uintptr_t)dma_addr;
-    page_req.count = len;
-    page_req.flags =
+    vfu_ctx->page_request_completion = completion;
+    vfu_ctx->pending_page_request.addr = (uintptr_t)dma_addr;
+    vfu_ctx->pending_page_request.count = len;
+    vfu_ctx->pending_page_request.flags =
         ((prot & PROT_READ) ? VFIO_USER_DMA_PAGE_REQUEST_READ : 0) |
         ((prot & PROT_WRITE) ? VFIO_USER_DMA_PAGE_REQUEST_WRITE : 0);
-    page_req.pasid = pasid;
+    vfu_ctx->pending_page_request.pasid = pasid;
+
+    struct vfio_user_dma_page_request reply;
     return vfu_ctx->tran->send_msg(
-        vfu_ctx, msg_id++, VFIO_USER_DMA_PAGE_REQUEST, &page_req,
-        sizeof(page_req), NULL, &page_req, sizeof(page_req));
+        vfu_ctx, msg_id++, VFIO_USER_DMA_PAGE_REQUEST,
+        &vfu_ctx->pending_page_request, sizeof(vfu_ctx->pending_page_request),
+        NULL, &reply, sizeof(reply));
 }
 
 EXPORT int

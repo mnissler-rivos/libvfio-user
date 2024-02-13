@@ -684,13 +684,23 @@ vfu_addr_to_sgl_pasid(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
                       size_t max_nr_sgs, int prot);
 
 /**
+ * Completion callback for a page request operation.
+ *
+ * @vfu_ctx: the libvfio-user context
+ * @error: errno code indicating the status
+ *
+ * TODO: Additional context parameters will be required to distinguish
+ * concurrent page requests.
+ */
+typedef void(vfu_page_request_completion_cb_t)(vfu_ctx_t *vfu_ctx, int error);
+
+/**
  * Request a range of memory to be made available by the host. This analogous
  * to a PCIe PRI page request. This command merely conveys the request to the
  * server and the reply acknowledges reception. The memory regions are made
- * available asynchronously and will result in a DMA_MAP call for the specified
- * memory range. Note that the DMA_MAP call may indicate different protection
- * bits from the ones requested. In particular, if the region can't be
- * accessed, the protection bits in the DMA_MAP invocation will be all zero.
+ * available asynchronously and will result in one or more DMA_MAP calls to make
+ * the requested memory range available for DMA. Completion of the request is
+ * reported via the provided callback.
  *
  * TODO: This is a very minimal interface with room for improvement:
  *  * Matching up exactly one DMA_MAP call to a previous page request is
@@ -710,12 +720,14 @@ vfu_addr_to_sgl_pasid(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr,
  * @dma_addr: the guest I/O virtual address
  * @pasid: PASID to operate in
  * @prot: protection as defined in <sys/mman.h>
+ * @completion: Callback to invoke after the request completes
  *
  * @returns success if the host received the request successfully.
  */
 int
 vfu_page_request(vfu_ctx_t *vfu_ctx, vfu_dma_addr_t dma_addr, uint32_t pasid,
-                 size_t len, int prot);
+                 size_t len, int prot,
+                 vfu_page_request_completion_cb_t completion);
 
 /**
  * Populate the given iovec array (accessible in the process's virtual memory),
